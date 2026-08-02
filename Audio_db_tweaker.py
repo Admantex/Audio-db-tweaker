@@ -34,10 +34,73 @@ FFMPEG_INSTALL_MSG = (
 # Suppress the console window ffplay/ffmpeg would otherwise flash open on Windows.
 _SUBPROCESS_FLAGS = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
+if sys.platform == "win32":
+    import winreg
+
+
+def _registry_path_dirs():
+    """Read the PATH value straight from the Windows registry (both the
+    per-user and system-wide entries).
+
+    A newly launched process only sees the PATH that existed at the moment it
+    was spawned. On a freshly downloaded, SmartScreen-flagged .exe, that
+    inherited PATH can be stale even if the user added FFmpeg to PATH earlier
+    -- closing and relaunching the app then "fixes" it because the *new*
+    process picks up a fresher inherited PATH. Reading directly from the
+    registry sidesteps that entirely, since it always reflects the current
+    value regardless of when this process started.
+    """
+    if sys.platform != "win32":
+        return []
+
+    dirs = []
+    registry_locations = [
+        (winreg.HKEY_CURRENT_USER, r"Environment"),
+        (winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"),
+    ]
+    for hive, subkey in registry_locations:
+        try:
+            with winreg.OpenKey(hive, subkey) as key:
+                value, _ = winreg.QueryValueEx(key, "Path")
+                dirs.extend(p for p in value.split(os.pathsep) if p)
+        except OSError:
+            continue
+    return dirs
+
+
+def find_executable(name):
+    """Locate an executable, checking this process's own PATH first and
+    falling back to a live read of the Windows registry's PATH if not found
+    there. This makes detection resilient to a stale inherited environment."""
+    found = shutil.which(name)
+    if found:
+        return found
+
+    reg_dirs = _registry_path_dirs()
+    if not reg_dirs:
+        return None
+
+    combined_path = os.pathsep.join(reg_dirs)
+    return shutil.which(name, path=combined_path)
+
 
 def ffmpeg_available():
-    """Check if ffmpeg, ffprobe, and ffplay are all available on the system PATH."""
-    return all(shutil.which(tool) is not None for tool in ("ffmpeg", "ffprobe", "ffplay"))
+    """Check if ffmpeg, ffprobe, and ffplay are all available (via PATH or,
+    as a fallback, the Windows registry)."""
+    return all(find_executable(tool) is not None for tool in ("ffmpeg", "ffprobe", "ffplay"))
+
+
+def configure_pydub_paths():
+    """Point pydub directly at resolved ffmpeg/ffprobe paths (rather than letting
+    it resolve bare 'ffmpeg'/'ffprobe' names itself at call time). This makes
+    audio loading and exporting immune to the same stale-PATH issue that can
+    otherwise affect a freshly launched, SmartScreen-flagged .exe."""
+    ffmpeg_path = find_executable("ffmpeg")
+    ffprobe_path = find_executable("ffprobe")
+    if ffmpeg_path:
+        AudioSegment.converter = ffmpeg_path
+    if ffprobe_path:
+        AudioSegment.ffprobe = ffprobe_path
 
 
 def resource_path(relative_path):
@@ -228,7 +291,8 @@ class AudioDbTweakerApp(tk.Tk):
     def _play_audio(self, segment, label):
         self.stop_playback()
 
-        if shutil.which("ffplay") is None:
+        ffplay_path = find_executable("ffplay")
+        if ffplay_path is None:
             messagebox.showerror(
                 "ffplay Not Found",
                 "Playback requires 'ffplay', which ships with FFmpeg.\n\n" + FFMPEG_INSTALL_MSG,
@@ -246,7 +310,7 @@ class AudioDbTweakerApp(tk.Tk):
 
         try:
             self._play_proc = subprocess.Popen(
-                ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", tmp_path],
+                [ffplay_path, "-nodisp", "-autoexit", "-loglevel", "quiet", tmp_path],
                 creationflags=_SUBPROCESS_FLAGS,
             )
         except Exception as e:
@@ -323,11 +387,21 @@ class AudioDbTweakerApp(tk.Tk):
 
 
 def main():
+    configure_pydub_paths()
+
     app = AudioDbTweakerApp()
     app.protocol("WM_DELETE_WINDOW", app.on_close)
 
     if not ffmpeg_available():
-        messagebox.showwarning("FFmpeg Not Found", FFMPEG_INSTALL_MSG)
+        # Force the main window to the front first, then show the warning as its
+        # child. Without this, the dialog can occasionally spawn behind the main
+        # window (most noticeable in compiled .exe builds), making it look like
+        # it "disappeared" until the app is closed.
+        app.deiconify()
+        app.lift()
+        app.attributes("-topmost", True)
+        app.after(0, lambda: app.attributes("-topmost", False))
+        messagebox.showwarning("FFmpeg Not Found", FFMPEG_INSTALL_MSG, parent=app)
 
     app.mainloop()
 
