@@ -4,6 +4,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
@@ -109,6 +110,27 @@ def resource_path(relative_path):
     temporary folder referenced by sys._MEIPASS)."""
     base_path = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
     return os.path.join(base_path, relative_path)
+
+
+def run_with_retries(func, attempts=3, delay_seconds=0.6):
+    """Run func() and retry on failure with a short delay in between.
+
+    On a freshly downloaded, SmartScreen-flagged .exe, the very first attempt
+    to spawn a child process (ffmpeg/ffprobe) can transiently fail while
+    Windows finishes its reputation/real-time-scan check on the new file,
+    even though everything is correctly installed and on PATH. That clears
+    within a second or two, so a short retry avoids forcing a full app
+    restart for what is otherwise a one-off hiccup.
+    """
+    last_error = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return func()
+        except Exception as e:
+            last_error = e
+            if attempt < attempts:
+                time.sleep(delay_seconds)
+    raise last_error
 
 
 class AudioDbTweakerApp(tk.Tk):
@@ -231,11 +253,15 @@ class AudioDbTweakerApp(tk.Tk):
         self.update_idletasks()
 
         try:
-            audio = AudioSegment.from_file(path)
+            audio = run_with_retries(lambda: AudioSegment.from_file(path))
         except Exception as e:
             messagebox.showerror(
                 "Error",
-                f"Could not load audio file:\n{e}\n\nMake sure FFmpeg is installed and on your PATH.",
+                f"Could not load audio file after multiple attempts.\n\n"
+                f"Underlying error ({type(e).__name__}):\n{e}\n\n"
+                f"If this mentions a missing file/executable, make sure FFmpeg is "
+                f"installed and on your PATH. If it's a different error, it may be "
+                f"worth trying again, or restarting the app.",
             )
             self.status_var.set("Ready")
             return
@@ -373,9 +399,13 @@ class AudioDbTweakerApp(tk.Tk):
 
         fmt = os.path.splitext(save_path)[1][1:].lower() or "wav"
         try:
-            self.modified_audio.export(save_path, format=fmt)
+            run_with_retries(lambda: self.modified_audio.export(save_path, format=fmt))
         except Exception as e:
-            messagebox.showerror("Error", f"Could not save file:\n{e}")
+            messagebox.showerror(
+                "Error",
+                f"Could not save file after multiple attempts.\n\n"
+                f"Underlying error ({type(e).__name__}):\n{e}",
+            )
             return
 
         self.status_var.set(f"Saved to {save_path}")
