@@ -2,6 +2,9 @@
 
 A simple Windows-friendly desktop app (built with Python + Tkinter) for adjusting the volume of audio files with instant preview before and after the change.
 
+# Important note
+No, the app does not contain any malware, if Windows flags it as malicius it's because its not signed and therefore Windows Smartscreen will be triggered. If you still don't trust the .exe you can build it yourself (or just don't use the app) (:
+
 ## Features
 
 - **Upload any audio file** — supports mp3, wav, ogg, flac, m4a, aac, wma, aiff, and more
